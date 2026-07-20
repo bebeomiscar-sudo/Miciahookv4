@@ -1,6 +1,6 @@
 -- ============================================================
---  Rivals | Combat Script
---  Built from DEX BulletHandler Source
+--  Rivals | Combat Script v2
+--  Fixed ESP + Chams + Ragebot + Aimbot + Silent Aim
 -- ============================================================
 
 while not game:IsLoaded() do task.wait(0.1) end
@@ -13,6 +13,7 @@ local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris            = game:GetService("Debris")
+local Lighting          = game:GetService("Lighting")
 
 local LP                = Players.LocalPlayer
 local Camera            = workspace.CurrentCamera
@@ -20,29 +21,49 @@ local Camera            = workspace.CurrentCamera
 -- ============================================================
 -- [[ SAFE REQUIRE ]]
 -- ============================================================
-local function SafeRequire(path)
-    local ok, r = pcall(require, path)
+local function SafeRequire(inst)
+    if not inst then return nil end
+    local ok, r = pcall(require, inst)
     return ok and r or nil
 end
 
 -- ============================================================
--- [[ MODULE + REMOTE REFERENCES ]]
+-- [[ MODULE REFERENCES ]]
 -- ============================================================
-local GunModules    = ReplicatedStorage:WaitForChild("ModuleScripts", 10)
-    and ReplicatedStorage.ModuleScripts:WaitForChild("GunModules", 10)
+local GunModules = nil
+local function FindGunModules()
+    local ms = ReplicatedStorage:FindFirstChild("ModuleScripts")
+    if ms then
+        GunModules = ms:FindFirstChild("GunModules")
+    end
+end
+FindGunModules()
 
-local BulletHandler = GunModules and SafeRequire(GunModules:WaitForChild("BulletHandler", 5))
+local BulletHandler    = GunModules and SafeRequire(GunModules:FindFirstChild("BulletHandler"))
+local ProjectileRender = GunModules and SafeRequire(GunModules:FindFirstChild("ProjectileRender"))
 
--- EquipItem remote
-local EquipItemRemote = ReplicatedStorage:WaitForChild("Remotes", 10)
-    and ReplicatedStorage.Remotes:WaitForChild("EquipItem", 5)
+local EquipItemRemote  = nil
+task.spawn(function()
+    local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+    if remotes then
+        EquipItemRemote = remotes:FindFirstChild("EquipItem")
+    end
+end)
 
--- We need to capture CheckShotEvent + FinishedEvent from live Fire calls
--- These are stored inside data.Network so we grab them on first Fire call
+-- ============================================================
+-- [[ CAPTURED WEAPON DATA ]]
+-- Filled on every real BulletHandler.Fire call
+-- ============================================================
 local CapturedNetwork = nil
 local CapturedVisuals = nil
 local CapturedLogic   = nil
 local CapturedMisc    = nil
+
+-- Original references for restoration
+local OriginalBHFire     = nil
+local OriginalPRCast     = nil
+local BHHooked           = false
+local PRHooked           = false
 
 -- ============================================================
 -- [[ UI LIBRARY ]]
@@ -66,22 +87,102 @@ local dc = bc:CreateWindow({
 })
 
 local ch = {
-    Combat   = dc:AddTab('Combat'),
-    Visual   = dc:AddTab('Visual'),
-    Misc     = dc:AddTab('Misc'),
-    ['Ui']   = dc:AddTab('Ui'),
+    Combat  = dc:AddTab('Combat'),
+    Visual  = dc:AddTab('Visual'),
+    Misc    = dc:AddTab('Misc'),
+    ['Ui']  = dc:AddTab('Ui'),
 }
 
 -- ============================================================
 -- [[ COMBAT TAB ]]
 -- ============================================================
-local SilentGroup  = ch.Combat:AddLeftGroupbox('Silent Aim')
-local SilentCfg    = ch.Combat:AddRightGroupbox('Silent Aim Settings')
-local RagebotGroup = ch.Combat:AddLeftGroupbox('Ragebot')
-local RagebotCfg   = ch.Combat:AddRightGroupbox('Ragebot Settings')
-local GunGroup     = ch.Combat:AddLeftGroupbox('Gun Modifiers')
-local AntiAimGroup = ch.Combat:AddLeftGroupbox('Anti Aim')
-local AntiAimCfg   = ch.Combat:AddRightGroupbox('Anti Aim Settings')
+local AimbotGroup   = ch.Combat:AddLeftGroupbox('Aimbot')
+local AimbotCfg     = ch.Combat:AddRightGroupbox('Aimbot Settings')
+local SilentGroup   = ch.Combat:AddLeftGroupbox('Silent Aim')
+local SilentCfg     = ch.Combat:AddRightGroupbox('Silent Aim Settings')
+local RagebotGroup  = ch.Combat:AddLeftGroupbox('Ragebot')
+local RagebotCfg    = ch.Combat:AddRightGroupbox('Ragebot Settings')
+
+-- ============================================================
+-- AIMBOT
+-- ============================================================
+AimbotGroup:AddToggle('AimbotEnabled', {
+    Text     = 'Aimbot',
+    Default  = false,
+    Callback = function(v) getgenv().AimbotEnabled = v end
+})
+:AddKeyPicker('AimbotKey', {
+    Default         = 'None',
+    Mode            = 'Hold',
+    Text            = 'Aimbot Key',
+    NoUI            = false,
+    Callback        = function() end,
+    ChangedCallback = function() end,
+})
+
+AimbotGroup:AddToggle('AimbotAlways', {
+    Text     = 'Always Active (Mobile)',
+    Default  = false,
+    Callback = function() end
+})
+
+AimbotGroup:AddToggle('AimbotTeamCheck', {
+    Text     = 'Team Check',
+    Default  = true,
+    Callback = function() end
+})
+
+AimbotGroup:AddToggle('AimbotVisCheck', {
+    Text     = 'Visibility Check',
+    Default  = false,
+    Callback = function() end
+})
+
+AimbotGroup:AddToggle('AimbotFOVDraw', {
+    Text     = 'Draw FOV Circle',
+    Default  = false,
+    Callback = function() end
+})
+
+AimbotGroup:AddDropdown('AimbotBone', {
+    Text    = 'Target Bone',
+    Default = 'Head',
+    Values  = { 'Head', 'HumanoidRootPart', 'UpperTorso', 'Torso' },
+    Callback = function() end
+})
+
+AimbotCfg:AddSlider('AimbotFOV', {
+    Text     = 'FOV',
+    Default  = 200,
+    Min      = 10,
+    Max      = 800,
+    Rounding = 0,
+    Suffix   = ' px',
+    Callback = function() end
+})
+
+AimbotCfg:AddSlider('AimbotSmoothing', {
+    Text     = 'Smoothing',
+    Default  = 10,
+    Min      = 1,
+    Max      = 100,
+    Rounding = 0,
+    Callback = function() end
+})
+
+AimbotCfg:AddSlider('AimbotFOVTransp', {
+    Text     = 'FOV Transparency',
+    Default  = 50,
+    Min      = 0,
+    Max      = 100,
+    Rounding = 0,
+    Callback = function() end
+})
+
+AimbotCfg:AddLabel('FOV Color'):AddColorPicker('AimbotFOVColor', {
+    Default  = Color3.fromRGB(255, 255, 255),
+    Callback = function() end
+})
 
 -- ============================================================
 -- SILENT AIM
@@ -89,9 +190,7 @@ local AntiAimCfg   = ch.Combat:AddRightGroupbox('Anti Aim Settings')
 SilentGroup:AddToggle('SilentAimEnabled', {
     Text     = 'Silent Aim',
     Default  = false,
-    Callback = function(v)
-        getgenv().SilentAimEnabled = v
-    end
+    Callback = function(v) getgenv().SilentAimEnabled = v end
 })
 
 SilentGroup:AddToggle('SilentAimTeamCheck', {
@@ -106,10 +205,52 @@ SilentGroup:AddToggle('SilentAimVisCheck', {
     Callback = function() end
 })
 
+SilentGroup:AddToggle('SilentAimFOVDraw', {
+    Text     = 'Draw FOV Circle',
+    Default  = false,
+    Callback = function() end
+})
+
 SilentGroup:AddDropdown('SilentAimBone', {
     Text    = 'Target Bone',
     Default = 'Head',
     Values  = { 'Head', 'HumanoidRootPart', 'UpperTorso', 'Torso' },
+    Callback = function() end
+})
+
+-- Legit settings
+SilentGroup:AddSlider('HitChance', {
+    Text     = 'Hit Chance',
+    Default  = 100,
+    Min      = 1,
+    Max      = 100,
+    Rounding = 0,
+    Suffix   = '%',
+    Callback = function() end
+})
+
+SilentGroup:AddSlider('SilentAimMaxDist', {
+    Text     = 'Max Distance',
+    Default  = 500,
+    Min      = 10,
+    Max      = 2000,
+    Rounding = 0,
+    Suffix   = ' studs',
+    Callback = function() end
+})
+
+SilentGroup:AddToggle('SilentAimPrediction', {
+    Text     = 'Prediction',
+    Default  = false,
+    Callback = function() end
+})
+
+SilentGroup:AddSlider('SilentAimPredictScale', {
+    Text     = 'Predict Scale',
+    Default  = 5,
+    Min      = 1,
+    Max      = 20,
+    Rounding = 0,
     Callback = function() end
 })
 
@@ -123,14 +264,26 @@ SilentCfg:AddSlider('SilentAimFOV', {
     Callback = function() end
 })
 
-SilentCfg:AddToggle('SilentAimFOVDraw', {
-    Text     = 'Draw FOV Circle',
-    Default  = false,
+SilentCfg:AddSlider('SilentFOVTransp', {
+    Text     = 'FOV Transparency',
+    Default  = 50,
+    Min      = 0,
+    Max      = 100,
+    Rounding = 0,
+    Callback = function() end
+})
+
+SilentCfg:AddSlider('SilentAimSmoothing', {
+    Text     = 'Smoothing (Legit)',
+    Default  = 1,
+    Min      = 1,
+    Max      = 20,
+    Rounding = 1,
     Callback = function() end
 })
 
 SilentCfg:AddLabel('FOV Color'):AddColorPicker('SilentFOVColor', {
-    Default  = Color3.fromRGB(255, 255, 255),
+    Default  = Color3.fromRGB(255, 200, 0),
     Callback = function() end
 })
 
@@ -140,9 +293,7 @@ SilentCfg:AddLabel('FOV Color'):AddColorPicker('SilentFOVColor', {
 RagebotGroup:AddToggle('RagebotEnabled', {
     Text     = 'Ragebot',
     Default  = false,
-    Callback = function(v)
-        getgenv().RagebotEnabled = v
-    end
+    Callback = function(v) getgenv().RagebotEnabled = v end
 })
 
 RagebotGroup:AddToggle('RagebotTeamCheck', {
@@ -157,9 +308,22 @@ RagebotGroup:AddToggle('RagebotVisCheck', {
     Callback = function() end
 })
 
+RagebotGroup:AddToggle('RagebotClosestOnly', {
+    Text     = 'Closest Only',
+    Default  = false,
+    Callback = function() end
+})
+
 RagebotGroup:AddButton('Force Kill All', function()
     _G.ForceKillAll = true
 end)
+
+RagebotGroup:AddDropdown('RagebotBone', {
+    Text    = 'Target Bone',
+    Default = 'Head',
+    Values  = { 'Head', 'HumanoidRootPart', 'UpperTorso', 'Torso' },
+    Callback = function() end
+})
 
 RagebotCfg:AddSlider('RagebotDelay', {
     Text     = 'Fire Delay',
@@ -171,7 +335,7 @@ RagebotCfg:AddSlider('RagebotDelay', {
     Callback = function() end
 })
 
-RagebotCfg:AddSlider('RagebotRepeat', {
+RagebotCfg:AddSlider('RagebotInterval', {
     Text     = 'Repeat Interval',
     Default  = 200,
     Min      = 50,
@@ -190,124 +354,14 @@ RagebotCfg:AddSlider('RagebotHitsPerTarget', {
     Callback = function() end
 })
 
-RagebotCfg:AddDropdown('RagebotBone', {
-    Text    = 'Target Bone',
-    Default = 'Head',
-    Values  = { 'Head', 'HumanoidRootPart', 'UpperTorso', 'Torso' },
+RagebotCfg:AddSlider('RagebotMaxDist', {
+    Text     = 'Max Distance',
+    Default  = 500,
+    Min      = 50,
+    Max      = 2000,
+    Rounding = 0,
+    Suffix   = ' studs',
     Callback = function() end
-})
-
--- ============================================================
--- GUN MODIFIERS
--- ============================================================
-GunGroup:AddToggle('NoSpread', {
-    Text     = 'No Spread',
-    Default  = false,
-    Callback = function(v)
-        getgenv().NoSpread = v
-    end
-})
-
-GunGroup:AddToggle('NoRecoil', {
-    Text     = 'No Recoil',
-    Default  = false,
-    Callback = function(v)
-        getgenv().NoRecoil = v
-    end
-})
-
-GunGroup:AddToggle('NoReload', {
-    Text     = 'No Reload',
-    Default  = false,
-    Callback = function(v)
-        getgenv().NoReload = v
-    end
-})
-
-GunGroup:AddToggle('InfiniteAmmo', {
-    Text     = 'Infinite Ammo',
-    Default  = false,
-    Callback = function(v)
-        getgenv().InfiniteAmmo = v
-    end
-})
-
-GunGroup:AddToggle('WeaponUnlock', {
-    Text     = 'Weapon Unlock (All)',
-    Default  = false,
-    Callback = function(v)
-        if v then
-            _G.DoWeaponUnlock = true
-        end
-    end
-})
-
-GunGroup:AddInput('WeaponUnlockName', {
-    Text        = 'Weapon Name',
-    Default     = '',
-    Placeholder = 'e.g. AK47, M4A1...',
-    Finished    = true,
-    Callback    = function(v)
-        getgenv().WeaponUnlockName = v
-    end
-})
-
-GunGroup:AddButton('Equip Weapon', function()
-    if not EquipItemRemote then
-        warn("[creep.cc] EquipItem remote not found")
-        return
-    end
-    local name = getgenv().WeaponUnlockName or ""
-    if name == "" then
-        warn("[creep.cc] Enter a weapon name first")
-        return
-    end
-    pcall(function()
-        EquipItemRemote:FireServer(name)
-    end)
-end)
-
--- ============================================================
--- ANTI AIM
--- ============================================================
-AntiAimGroup:AddToggle('AntiAimEnabled', {
-    Text     = 'Anti Aim',
-    Default  = false,
-    Callback = function(v)
-        getgenv().AntiAimEnabled = v
-        if not v then RestoreAntiAim() end
-    end
-})
-
-AntiAimGroup:AddDropdown('AntiAimMode', {
-    Text    = 'Mode',
-    Default = 'Random 1',
-    Values  = { 'Random 1', 'Random 2', 'Down', 'Up', 'Custom' },
-    Callback = function(v)
-        getgenv().AntiAimMode = v
-    end
-})
-
-AntiAimCfg:AddSlider('AntiAimUpAngle', {
-    Text     = 'Up Angle',
-    Default  = 0,
-    Min      = 0,
-    Max      = 9,
-    Rounding = 1,
-    Callback = function(v)
-        getgenv().AntiAimUpAngle = v
-    end
-})
-
-AntiAimCfg:AddSlider('AntiAimDownAngle', {
-    Text     = 'Down Angle',
-    Default  = 0,
-    Min      = 0,
-    Max      = 9,
-    Rounding = 1,
-    Callback = function(v)
-        getgenv().AntiAimDownAngle = v
-    end
 })
 
 -- ============================================================
@@ -316,7 +370,8 @@ AntiAimCfg:AddSlider('AntiAimDownAngle', {
 local ESPGroup    = ch.Visual:AddLeftGroupbox('ESP')
 local ESPCfg      = ch.Visual:AddRightGroupbox('ESP Settings')
 local ChamsGroup  = ch.Visual:AddLeftGroupbox('Chams')
-local TracerGroup = ch.Visual:AddRightGroupbox('Bullet Tracers')
+local ChamsCfg    = ch.Visual:AddRightGroupbox('Chams Settings')
+local TracerGroup = ch.Visual:AddRightGroupbox('Bullet Tracer')
 
 -- ESP
 ESPGroup:AddToggle('ESPEnabled', {
@@ -365,13 +420,27 @@ ESPCfg:AddSlider('ESPMaxDist', {
     Callback = function() end
 })
 
+ESPCfg:AddSlider('ESPBoxThickness', {
+    Text     = 'Box Thickness',
+    Default  = 1,
+    Min      = 1,
+    Max      = 5,
+    Rounding = 0,
+    Callback = function() end
+})
+
 ESPCfg:AddLabel('Enemy Color'):AddColorPicker('ESPEnemyColor', {
-    Default  = Color3.fromRGB(255, 50, 50),
+    Default  = Color3.fromRGB(255, 60, 60),
     Callback = function() end
 })
 
 ESPCfg:AddLabel('Team Color'):AddColorPicker('ESPTeamColor', {
-    Default  = Color3.fromRGB(50, 255, 50),
+    Default  = Color3.fromRGB(60, 255, 60),
+    Callback = function() end
+})
+
+ESPCfg:AddLabel('Name Color'):AddColorPicker('ESPNameColor', {
+    Default  = Color3.new(1, 1, 1),
     Callback = function() end
 })
 
@@ -382,36 +451,69 @@ ChamsGroup:AddToggle('ChamsEnabled', {
     Callback = function() end
 })
 
+ChamsGroup:AddToggle('ChamsTeamCheck', {
+    Text     = 'Team Check',
+    Default  = true,
+    Callback = function() end
+})
+
 ChamsGroup:AddDropdown('ChamsStyle', {
     Text    = 'Style',
     Default = 'Neon',
     Values  = { 'Neon', 'Glass', 'ForceField', 'CrackedLava', 'SmoothPlastic' },
-    Callback = function() end
+    Callback = function(v)
+        -- Rebuild chams on style change
+        _G.ChamsRebuild = true
+    end
 })
 
-ChamsGroup:AddLabel('Visible Color'):AddColorPicker('ChamsVisColor', {
-    Default  = Color3.fromRGB(0, 200, 255),
-    Callback = function() end
-})
-
-ChamsGroup:AddLabel('Wallhack Color'):AddColorPicker('ChamsWallColor', {
-    Default  = Color3.fromRGB(255, 0, 100),
-    Callback = function() end
-})
-
-ChamsGroup:AddSlider('ChamsTransparency', {
+ChamsCfg:AddSlider('ChamsTransparency', {
     Text     = 'Transparency',
     Default  = 30,
     Min      = 0,
     Max      = 100,
     Rounding = 0,
     Suffix   = '%',
+    Callback = function()
+        _G.ChamsRebuild = true
+    end
+})
+
+ChamsCfg:AddLabel('Body Color'):AddColorPicker('ChamsBodyColor', {
+    Default  = Color3.fromRGB(0, 200, 255),
+    Callback = function()
+        _G.ChamsRebuild = true
+    end
+})
+
+ChamsCfg:AddLabel('Wallhack Color'):AddColorPicker('ChamsWallColor', {
+    Default  = Color3.fromRGB(255, 0, 100),
+    Callback = function()
+        _G.ChamsRebuild = true
+    end
+})
+
+ChamsCfg:AddSlider('ChamsWallTransp', {
+    Text     = 'Wallhack Transparency',
+    Default  = 40,
+    Min      = 0,
+    Max      = 100,
+    Rounding = 0,
+    Suffix   = '%',
+    Callback = function()
+        _G.ChamsRebuild = true
+    end
+})
+
+-- Bullet Tracer
+TracerGroup:AddToggle('TracerEnabled', {
+    Text     = 'Bullet Tracer',
+    Default  = false,
     Callback = function() end
 })
 
--- Bullet Tracers
-TracerGroup:AddToggle('TracerEnabled', {
-    Text     = 'Bullet Tracers',
+TracerGroup:AddToggle('TracerDisableOriginal', {
+    Text     = 'Disable Original Tracers',
     Default  = false,
     Callback = function() end
 })
@@ -446,6 +548,13 @@ TracerGroup:AddToggle('TracerFade', {
     Callback = function() end
 })
 
+TracerGroup:AddDropdown('TracerFrom', {
+    Text    = 'From',
+    Default = 'Camera',
+    Values  = { 'Camera', 'Bottom Screen' },
+    Callback = function() end
+})
+
 -- ============================================================
 -- [[ MISC TAB ]]
 -- ============================================================
@@ -459,11 +568,13 @@ NightGroup:AddToggle('NightMode', {
     Default  = false,
     Callback = function(v)
         if v then
-            game:GetService("Lighting").ClockTime    = 0
-            game:GetService("Lighting").Brightness   = 0
+            Lighting.ClockTime  = 0
+            Lighting.Brightness = 0
         else
-            game:GetService("Lighting").ClockTime    = 12
-            game:GetService("Lighting").Brightness   = 2
+            Lighting.ClockTime  = 12
+            Lighting.Brightness = 2
+            local b = Lighting:FindFirstChild("NightBloom")
+            if b then b:Destroy() end
         end
     end
 })
@@ -475,8 +586,8 @@ NightGroup:AddSlider('NightBloomSize', {
     Max      = 100,
     Rounding = 0,
     Callback = function(v)
-        local bloom = game:GetService("Lighting"):FindFirstChild("NightBloom")
-        if bloom then bloom.Size = v end
+        local b = Lighting:FindFirstChild("NightBloom")
+        if b then b.Size = v end
     end
 })
 
@@ -487,8 +598,8 @@ NightGroup:AddSlider('NightBloomIntensity', {
     Max      = 5,
     Rounding = 1,
     Callback = function(v)
-        local bloom = game:GetService("Lighting"):FindFirstChild("NightBloom")
-        if bloom then bloom.Intensity = v end
+        local b = Lighting:FindFirstChild("NightBloom")
+        if b then b.Intensity = v end
     end
 })
 
@@ -496,9 +607,7 @@ SkyboxGroup:AddDropdown('SkyboxType', {
     Text    = 'Skybox',
     Default = 'Default',
     Values  = { 'Default', 'Two Moon', 'Aurora', 'Night' },
-    Callback = function(v)
-        ApplySkybox(v)
-    end
+    Callback = function(v) ApplySkybox(v) end
 })
 
 FogGroup:AddSlider('FogStart', {
@@ -507,9 +616,7 @@ FogGroup:AddSlider('FogStart', {
     Min      = 0,
     Max      = 3000,
     Rounding = 0,
-    Callback = function(v)
-        game:GetService("Lighting").FogStart = v
-    end
+    Callback = function(v) Lighting.FogStart = v end
 })
 
 FogGroup:AddSlider('FogEnd', {
@@ -518,16 +625,12 @@ FogGroup:AddSlider('FogEnd', {
     Min      = 0,
     Max      = 3000,
     Rounding = 0,
-    Callback = function(v)
-        game:GetService("Lighting").FogEnd = v
-    end
+    Callback = function(v) Lighting.FogEnd = v end
 })
 
 FogGroup:AddLabel('Fog Color'):AddColorPicker('FogColor', {
     Default  = Color3.fromRGB(200, 200, 200),
-    Callback = function(v)
-        game:GetService("Lighting").FogColor = v
-    end
+    Callback = function(v) Lighting.FogColor = v end
 })
 
 WorldGroup:AddToggle('WorldColorEnabled', {
@@ -540,7 +643,7 @@ WorldGroup:AddLabel('Ambient'):AddColorPicker('WorldAmbient', {
     Default  = Color3.fromRGB(128, 128, 128),
     Callback = function(v)
         if Toggles["WorldColorEnabled"].Value then
-            game:GetService("Lighting").Ambient = v
+            Lighting.Ambient = v
         end
     end
 })
@@ -549,7 +652,7 @@ WorldGroup:AddLabel('Outdoor Ambient'):AddColorPicker('WorldOutdoor', {
     Default  = Color3.fromRGB(128, 128, 128),
     Callback = function(v)
         if Toggles["WorldColorEnabled"].Value then
-            game:GetService("Lighting").OutdoorAmbient = v
+            Lighting.OutdoorAmbient = v
         end
     end
 })
@@ -579,8 +682,8 @@ ci:SetLibrary(bc)
 bx:SetLibrary(bc)
 bx:IgnoreThemeSettings()
 bx:SetIgnoreIndexes({})
-ci:SetFolder('rivals_combat')
-bx:SetFolder('rivals_combat/cfg')
+ci:SetFolder('rivals_v2')
+bx:SetFolder('rivals_v2/cfg')
 bx:BuildConfigSection(ch['Ui'])
 ci:ApplyToTab(ch['Ui'])
 ci:ApplyTheme('Logic')
@@ -594,36 +697,25 @@ bc:OnUnload(function() bc.Unloaded = true end)
 -- ============================================================
 -- [[ GETENV DEFAULTS ]]
 -- ============================================================
-getgenv().SilentAimEnabled  = false
-getgenv().RagebotEnabled    = false
-getgenv().NoSpread          = false
-getgenv().NoRecoil          = false
-getgenv().NoReload          = false
-getgenv().InfiniteAmmo      = false
-getgenv().AntiAimEnabled    = false
-getgenv().AntiAimMode       = "Random 1"
-getgenv().AntiAimUpAngle    = 0
-getgenv().AntiAimDownAngle  = 0
-getgenv().WeaponUnlockName  = ""
-_G.ForceKillAll             = false
-_G.DoWeaponUnlock           = false
+getgenv().AimbotEnabled    = false
+getgenv().SilentAimEnabled = false
+getgenv().RagebotEnabled   = false
+_G.ForceKillAll            = false
+_G.ChamsRebuild            = false
 
 -- ============================================================
 -- [[ HELPERS ]]
 -- ============================================================
-local function Get(t)  return Toggles[t] and Toggles[t].Value end
-local function Opt(o)  return Options[o]  and Options[o].Value  end
+local function Get(t)  return Toggles[t] and Toggles[t].Value or false end
+local function Opt(o)  return Options[o]  and Options[o].Value end
 
-local function GetChar()
-    return LP.Character
-end
-
+local function GetChar()   return LP.Character end
 local function GetRoot()
     local c = GetChar()
     return c and c:FindFirstChild("HumanoidRootPart")
 end
 
-local function IsAlive(player)
+local function IsPlayerAlive(player)
     local char = player.Character
     if not char then return false end
     local hum = char:FindFirstChildOfClass("Humanoid")
@@ -633,17 +725,14 @@ end
 local function CanSee(fromPos, toPos)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    local myChar = GetChar()
-    params.FilterDescendantsInstances = myChar and { myChar } or {}
-
+    local c = GetChar()
+    params.FilterDescendantsInstances = c and { c } or {}
     local dir    = toPos - fromPos
     local result = workspace:Raycast(fromPos, dir, params)
     if result then
-        local inst = result.Instance
-        if inst and inst.Parent then
-            return inst.Parent:FindFirstChildOfClass("Humanoid") ~= nil
-        end
-        return false
+        return result.Instance and
+               result.Instance.Parent and
+               result.Instance.Parent:FindFirstChildOfClass("Humanoid") ~= nil
     end
     return true
 end
@@ -653,47 +742,68 @@ local function GetBonePart(char, boneName)
         or char:FindFirstChild("HumanoidRootPart")
 end
 
-local function GetEnemies(teamCheckToggle, visCheckToggle, boneName)
-    local enemies = {}
-    local myChar  = GetChar()
-    if not myChar then return enemies end
+-- Predict future position of a part
+local function PredictPosition(part, scale)
+    local vel  = part.AssemblyLinearVelocity
+    local dist = (part.Position - Camera.CFrame.Position).Magnitude
+    local t    = dist / math.max(300, 1)
+    return part.Position + vel * t * (scale / 5)
+end
+
+-- ============================================================
+-- [[ GET VALID ENEMIES ]]
+-- ============================================================
+local function GetEnemies(teamCheck, visCheck, boneName, maxDist)
+    local list   = {}
+    local myChar = GetChar()
+    if not myChar then return list end
+    local myRoot = GetRoot()
+    if not myRoot then return list end
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LP then continue end
-        if not IsAlive(player) then continue end
-        if teamCheckToggle and LP.Team and player.Team == LP.Team then continue end
+        if not IsPlayerAlive(player) then continue end
 
         local char = player.Character
         if not char then continue end
 
+        if teamCheck and LP.Team and player.Team == LP.Team then continue end
+
         local part = GetBonePart(char, boneName or "Head")
         if not part then continue end
 
-        if visCheckToggle then
-            local root = GetRoot()
-            if root and not CanSee(root.Position, part.Position) then continue end
+        local dist = (part.Position - myRoot.Position).Magnitude
+        if maxDist and dist > maxDist then continue end
+
+        if visCheck then
+            if not CanSee(myRoot.Position, part.Position) then continue end
         end
 
-        table.insert(enemies, { Player = player, Character = char, Part = part })
+        table.insert(list, {
+            Player    = player,
+            Character = char,
+            Part      = part,
+            Distance  = dist,
+        })
     end
 
-    return enemies
+    return list
 end
 
-local function GetClosestEnemyOnScreen(fovRadius, boneName, teamCheck, visCheck)
-    local center  = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-    local bestDist= math.huge
-    local bestData= nil
+-- Get closest enemy inside FOV circle on screen
+local function GetClosestOnScreen(fovRadius, boneName, teamCheck, visCheck, maxDist)
+    local center   = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local bestDist = math.huge
+    local bestData = nil
 
-    local enemies = GetEnemies(teamCheck, visCheck, boneName)
+    local enemies = GetEnemies(teamCheck, visCheck, boneName, maxDist)
     for _, data in ipairs(enemies) do
-        local part = data.Part
-        local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+        local sp, onScreen = Camera:WorldToViewportPoint(data.Part.Position)
         if not onScreen then continue end
 
-        local dist2D = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-        if dist2D <= fovRadius and dist2D < bestDist then
-            bestDist = dist2D
+        local d2 = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+        if d2 <= fovRadius and d2 < bestDist then
+            bestDist = d2
             bestData = data
         end
     end
@@ -702,365 +812,295 @@ local function GetClosestEnemyOnScreen(fovRadius, boneName, teamCheck, visCheck)
 end
 
 -- ============================================================
--- [[ BULLET ID GENERATOR ]]
+-- [[ BULLET HANDLER HOOK ]]
 -- ============================================================
+local function HookBulletHandler()
+    if BHHooked then return end
+    if not BulletHandler or not BulletHandler.Fire then
+        warn("[creep.cc] BulletHandler not found")
+        return
+    end
+
+    OriginalBHFire = BulletHandler.Fire
+
+    BulletHandler.Fire = function(p6)
+        -- Always capture weapon data from real shots
+        if p6 then
+            if p6.Network then CapturedNetwork = p6.Network end
+            if p6.Visuals  then CapturedVisuals = p6.Visuals  end
+            if p6.Logic    then CapturedLogic   = p6.Logic    end
+            if p6.Misc     then CapturedMisc    = p6.Misc     end
+        end
+
+        -- ===================================================
+        -- SILENT AIM: redirect direction toward target
+        -- ===================================================
+        if getgenv().SilentAimEnabled and p6 and p6.Origin then
+            -- Hit chance check
+            local hitChance = Opt("HitChance") or 100
+            local roll      = math.random(1, 100)
+
+            if roll <= hitChance then
+                local fov      = Opt("SilentAimFOV")      or 250
+                local bone     = Opt("SilentAimBone")     or "Head"
+                local teamChk  = Get("SilentAimTeamCheck")
+                local visChk   = Get("SilentAimVisCheck")
+                local maxDist  = Opt("SilentAimMaxDist")  or 500
+                local smooth   = Opt("SilentAimSmoothing")or 1
+                local predict  = Get("SilentAimPrediction")
+                local predSc   = Opt("SilentAimPredictScale") or 5
+
+                local target = GetClosestOnScreen(fov, bone, teamChk, visChk, maxDist)
+
+                if target and target.Part then
+                    local targetPos = predict
+                        and PredictPosition(target.Part, predSc)
+                        or  target.Part.Position
+
+                    local rawDir   = (targetPos - p6.Origin).Unit
+
+                    -- Legit smoothing: lerp direction slightly
+                    if smooth > 1 then
+                        local currentDir = p6.Direction
+                        rawDir = currentDir:Lerp(rawDir, 1 / smooth)
+                    end
+
+                    p6.Direction = rawDir
+                end
+            end
+        end
+
+        return OriginalBHFire(p6)
+    end
+
+    BHHooked = true
+    print("[creep.cc] BulletHandler.Fire hooked")
+end
+
+-- ============================================================
+-- [[ PROJECTILE RENDER HOOK ]]
+-- For disabling/modifying original tracers
+-- ============================================================
+local function HookProjectileRender()
+    if PRHooked then return end
+    if not ProjectileRender or not ProjectileRender.Cast then
+        warn("[creep.cc] ProjectileRender not found")
+        return
+    end
+
+    OriginalPRCast = ProjectileRender.Cast
+
+    ProjectileRender.Cast = function(self, data)
+        -- If DisableTracers is on, skip original tracer
+        if Get("TracerEnabled") and Get("TracerDisableOriginal") then
+            return
+        end
+        return OriginalPRCast(self, data)
+    end
+
+    PRHooked = true
+    print("[creep.cc] ProjectileRender.Cast hooked")
+end
+
+task.spawn(HookBulletHandler)
+task.spawn(HookProjectileRender)
+
+-- ============================================================
+-- [[ RAGEBOT ]]
+-- Fires BulletHandler.Fire for each enemy
+-- Uses captured weapon data from real shots
+-- ============================================================
+local IsRagebotFiring = false
+local LastRagebotTime = 0
+
 local function NewBulletId()
     return math.random(100000, 999999)
 end
 
--- ============================================================
--- [[ BULLETHANDLER HOOK ]]
--- From DEX: BulletHandler.Fire takes a data table
--- We intercept and modify Direction for silent aim
--- We capture Network/Visuals/Logic/Misc for ragebot
--- ============================================================
-local OriginalFire = nil
-local HookActive   = false
+local function FireAtEnemy(enemyData)
+    if not CapturedNetwork then return end
+    if not enemyData or not enemyData.Part then return end
 
-local function HookBulletHandler()
-    if HookActive then return end
-    if not BulletHandler then
-        warn("[creep.cc] BulletHandler module not found!")
-        return
-    end
-    if not BulletHandler.Fire then
-        warn("[creep.cc] BulletHandler.Fire not found!")
-        return
-    end
-
-    OriginalFire = BulletHandler.Fire
-
-    BulletHandler.Fire = function(p6)
-        -- ===================================================
-        -- Capture live data from real fire for ragebot to use
-        -- ===================================================
-        if p6 and p6.Network then
-            CapturedNetwork = p6.Network
-            CapturedVisuals = p6.Visuals
-            CapturedLogic   = p6.Logic
-            CapturedMisc    = p6.Misc
-        end
-
-        -- ===================================================
-        -- NO SPREAD: zero out the spread value in Misc
-        -- ===================================================
-        if getgenv().NoSpread and p6.Misc then
-            p6.Misc.Spread = 0
-        end
-
-        -- ===================================================
-        -- NO RELOAD: set reload time to 0
-        -- ===================================================
-        if getgenv().NoReload and p6.Misc then
-            p6.Misc.ReloadTime = 0
-        end
-
-        -- ===================================================
-        -- INFINITE AMMO: set ammo to max
-        -- ===================================================
-        if getgenv().InfiniteAmmo and p6.Misc then
-            p6.Misc.AmmoCount = p6.Misc.MaxAmmo or 9999
-        end
-
-        -- ===================================================
-        -- SILENT AIM: redirect bullet direction to enemy
-        -- ===================================================
-        if getgenv().SilentAimEnabled and p6.Origin then
-            local fov      = Opt("SilentAimFOV") or 250
-            local bone     = Opt("SilentAimBone") or "Head"
-            local teamChk  = Get("SilentAimTeamCheck")
-            local visChk   = Get("SilentAimVisCheck")
-
-            local target = GetClosestEnemyOnScreen(fov, bone, teamChk, visChk)
-            if target and target.Part then
-                -- Redirect direction to target bone
-                local newDir    = (target.Part.Position - p6.Origin).Unit
-                p6.Direction    = newDir
-                -- Also update visual endpoint
-                local visualEnd = p6.Origin + newDir * 800
-                -- VisualOrigin stays same (muzzle position) for visual authenticity
-            end
-        end
-
-        -- ===================================================
-        -- Call original fire
-        -- ===================================================
-        return OriginalFire(p6)
-    end
-
-    HookActive = true
-    print("[creep.cc] BulletHandler.Fire hooked successfully!")
-end
-
-task.spawn(HookBulletHandler)
-
--- ============================================================
--- [[ RAGEBOT ]]
--- Uses captured Network/Visuals/Logic/Misc from real fires
--- Calls BulletHandler.Fire for each enemy
--- ============================================================
-local LastRagebotTime = 0
-local IsRagebotFiring = false
-
-local function FireAtTarget(targetData, network, visuals, logic, misc)
-    if not targetData or not targetData.Part then return end
-    if not network then return end
-
-    local myChar = GetChar()
-    if not myChar then return end
-
-    local myRoot = GetRoot()
-    if not myRoot then return end
-
-    local part      = targetData.Part
-    local origin    = myRoot.Position + Vector3.new(0, 1.5, 0)
+    local origin    = Camera.CFrame.Position
+    local part      = enemyData.Part
     local direction = (part.Position - origin).Unit
-    local hitsPerTarget = math.floor(Opt("RagebotHitsPerTarget") or 1)
-    local fireDelay     = (Opt("RagebotDelay") or 50) / 1000
+    local hits      = math.floor(Opt("RagebotHitsPerTarget") or 1)
+    local delay     = (Opt("RagebotDelay") or 50) / 1000
 
-    for _ = 1, hitsPerTarget do
-        -- Build fire data based on DEX BulletHandler.Fire signature
+    for i = 1, hits do
+        -- Build data table from DEX BulletHandler.Fire signature
         local fireData = {
-            Origin        = origin,
-            VisualOrigin  = origin,
-            Direction     = direction,
-            Force         = (misc and misc.Force) or Vector3.new(0, 0, 0),
-            Gravity       = (misc and misc.Gravity) or Vector3.new(0, -196.2, 0),
-            BulletId      = NewBulletId(),
-            Visuals       = visuals or {
+            Origin       = origin,
+            VisualOrigin = origin,
+            Direction    = direction,
+            -- Safely get from captured data
+            Force        = CapturedMisc and CapturedMisc.Force   or Vector3.new(0, 0, 0),
+            Gravity      = CapturedMisc and CapturedMisc.Gravity or Vector3.new(0, -196.2, 0),
+            BulletId     = NewBulletId(),
+            Visuals      = CapturedVisuals or {
                 BulletType = nil,
                 HitEffect  = nil,
             },
-            Logic         = logic or {
-                HitSound       = nil,
-                HitMarker      = nil,
-                IsExplosive    = false,
-                ExplosionRadius= 0,
-                ExplosionColor = Color3.new(1, 0.5, 0),
-                ExplosionSoundId = nil,
-                IsLaser        = false,
-                LaserColor     = Color3.new(1, 0, 0),
-                LaserWidth     = 0.1,
-                LaserTime      = 0.5,
-                LaserTexture   = nil,
-                LaserSpeed     = 100,
-                LaserLength    = 10,
-                LaserEmission  = 1,
+            Logic        = CapturedLogic or {
+                HitSound        = nil,
+                HitMarker       = nil,
+                IsExplosive     = false,
+                ExplosionRadius = 0,
             },
-            Network = network,
-            Misc    = {
-                AmmoCount  = getgenv().InfiniteAmmo and 9999 or (misc and misc.AmmoCount or 30),
-                Spread     = getgenv().NoSpread and 0 or (misc and misc.Spread or 0),
-                MaxAmmo    = misc and misc.MaxAmmo or 9999,
-                ReloadTime = getgenv().NoReload and 0 or (misc and misc.ReloadTime or 2),
+            Network      = CapturedNetwork,
+            Misc         = {
+                AmmoCount  = CapturedMisc and CapturedMisc.AmmoCount  or 30,
+                Spread     = 0,
+                MaxAmmo    = CapturedMisc and CapturedMisc.MaxAmmo    or 30,
+                ReloadTime = CapturedMisc and CapturedMisc.ReloadTime or 2,
                 CamCFrame  = Camera.CFrame,
                 NewSeed    = math.random(1, 999999),
-            }
+            },
         }
 
-        -- Fire through hooked function
         pcall(function()
-            OriginalFire(fireData)
+            -- Call original to bypass our own hook
+            OriginalBHFire(fireData)
         end)
 
-        if fireDelay > 0 then
-            task.wait(fireDelay)
+        if delay > 0 and i < hits then
+            task.wait(delay)
         end
     end
 end
 
 local function RunRagebot()
     if IsRagebotFiring then return end
-    if not CapturedNetwork then return end
+    if not CapturedNetwork then
+        warn("[creep.cc] Ragebot: No weapon data captured yet. Shoot first!")
+        return
+    end
 
-    local bone      = Opt("RagebotBone") or "Head"
+    local bone      = Opt("RagebotBone")     or "Head"
     local teamChk   = Get("RagebotTeamCheck")
     local visChk    = Get("RagebotVisCheck")
-    local enemies   = GetEnemies(teamChk, visChk, bone)
+    local maxDist   = Opt("RagebotMaxDist")  or 500
+    local closest   = Get("RagebotClosestOnly")
 
+    local enemies = GetEnemies(teamChk, visChk, bone, maxDist)
     if #enemies == 0 then return end
+
+    -- Sort by distance if closest only
+    if closest then
+        table.sort(enemies, function(a, b) return a.Distance < b.Distance end)
+        enemies = { enemies[1] }
+    end
 
     IsRagebotFiring = true
 
     task.spawn(function()
         for _, enemyData in ipairs(enemies) do
-            FireAtTarget(
-                enemyData,
-                CapturedNetwork,
-                CapturedVisuals,
-                CapturedLogic,
-                CapturedMisc
-            )
+            if not IsPlayerAlive(enemyData.Player) then continue end
+            FireAtEnemy(enemyData)
         end
         IsRagebotFiring = false
     end)
 end
 
--- ============================================================
--- [[ ANTI AIM SYSTEM ]]
--- Rotates specific body parts to confuse hitboxes
--- Parts: Head, Torso, LeftArm, LeftLowerArm,
---        LeftUpperArm, LeftUpperLeg
--- ============================================================
-local AntiAimParts       = {}
-local AntiAimOriginalC0  = {}
-local AntiAimConnections = {}
+-- Ragebot loop
+task.spawn(function()
+    while not bc.Unloaded do
+        task.wait(0.016)
 
--- Build part reference table
-local function BuildAntiAimParts(char)
-    if not char then return end
+        local now      = tick()
+        local interval = (Opt("RagebotInterval") or 200) / 1000
 
-    -- Part Name → Motor6D/Joint locations
-    local partNames = {
-        "Head",
-        "Torso",
-        "UpperTorso",
-        "LeftArm",
-        "LeftLowerArm",
-        "LeftUpperArm",
-        "LeftUpperLeg",
-    }
-
-    local joints = {}
-    for _, desc in ipairs(char:GetDescendants()) do
-        if desc:IsA("Motor6D") then
-            joints[#joints + 1] = desc
+        if (getgenv().RagebotEnabled and now - LastRagebotTime >= interval)
+            or _G.ForceKillAll then
+            _G.ForceKillAll = false
+            LastRagebotTime = now
+            RunRagebot()
         end
     end
-
-    AntiAimParts[char]       = {}
-    AntiAimOriginalC0[char]  = {}
-
-    for _, jointName in ipairs(partNames) do
-        for _, motor in ipairs(joints) do
-            if motor.Part1 and motor.Part1.Name == jointName then
-                AntiAimParts[char][jointName]       = motor
-                AntiAimOriginalC0[char][jointName]  = motor.C0
-            end
-        end
-    end
-end
-
-function RestoreAntiAim()
-    local char = GetChar()
-    if not char then return end
-    if not AntiAimParts[char] then return end
-
-    for partName, motor in pairs(AntiAimParts[char]) do
-        if motor and motor.Parent then
-            local orig = AntiAimOriginalC0[char][partName]
-            if orig then
-                pcall(function() motor.C0 = orig end)
-            end
-        end
-    end
-end
-
-local AntiAimAngle    = 0
-local RandomAngle1    = math.random(-180, 180)
-local RandomAngle2    = math.random(-180, 180)
-local LastRandomTime  = 0
-local RandomInterval  = 0.1
-
-local function GetAntiAimAngles()
-    local mode     = getgenv().AntiAimMode or "Random 1"
-    local upAng    = getgenv().AntiAimUpAngle   or 0
-    local downAng  = getgenv().AntiAimDownAngle or 0
-
-    -- X = pitch (up/down), Y = yaw (left/right), Z = roll
-    if mode == "Random 1" then
-        -- Random spin on all axes
-        local now = tick()
-        if now - LastRandomTime > RandomInterval then
-            RandomAngle1 = math.random(-180, 180)
-            LastRandomTime = now
-        end
-        return math.rad(RandomAngle1), math.rad(RandomAngle1 * 0.5), 0
-
-    elseif mode == "Random 2" then
-        -- Rapid flip random
-        local now = tick()
-        if now - LastRandomTime > 0.05 then
-            RandomAngle2 = math.random() < 0.5 and 180 or -180
-            LastRandomTime = now
-        end
-        return math.rad(RandomAngle2), 0, math.rad(RandomAngle2)
-
-    elseif mode == "Down" then
-        -- Force pitch downward
-        return math.rad(90 + downAng * 10), 0, 0
-
-    elseif mode == "Up" then
-        -- Force pitch upward
-        return math.rad(-(90 + upAng * 10)), 0, 0
-
-    elseif mode == "Custom" then
-        -- Blend up and down
-        local pitchUp   = math.rad(upAng   * 10)
-        local pitchDown = math.rad(downAng * 10)
-        local combined  = pitchUp - pitchDown
-        return combined, 0, 0
-    end
-
-    return 0, 0, 0
-end
-
-local function ApplyAntiAim(char)
-    if not char then return end
-    if not AntiAimParts[char] then
-        BuildAntiAimParts(char)
-    end
-
-    local pitchX, yawY, rollZ = GetAntiAimAngles()
-
-    -- Apply to each targeted part
-    local partAngles = {
-        Head          = CFrame.Angles(pitchX,         yawY,          rollZ),
-        Torso         = CFrame.Angles(pitchX * 0.5,   yawY,          0),
-        UpperTorso    = CFrame.Angles(pitchX * 0.5,   yawY,          0),
-        LeftArm       = CFrame.Angles(pitchX,         0,             rollZ * 0.5),
-        LeftLowerArm  = CFrame.Angles(pitchX * 0.7,   0,             0),
-        LeftUpperArm  = CFrame.Angles(pitchX * 0.8,   yawY * 0.5,    0),
-        LeftUpperLeg  = CFrame.Angles(pitchX * 0.6,   0,             rollZ * 0.3),
-    }
-
-    for partName, angleOffset in pairs(partAngles) do
-        local motor = AntiAimParts[char] and AntiAimParts[char][partName]
-        if motor and motor.Parent then
-            local origC0 = AntiAimOriginalC0[char] and AntiAimOriginalC0[char][partName]
-            if origC0 then
-                pcall(function()
-                    motor.C0 = origC0 * angleOffset
-                end)
-            end
-        end
-    end
-end
-
--- Rebuild anti aim when character respawns
-LP.CharacterAdded:Connect(function(char)
-    table.clear(AntiAimParts)
-    table.clear(AntiAimOriginalC0)
-    task.wait(0.5)
-    BuildAntiAimParts(char)
 end)
 
-if LP.Character then
-    task.spawn(function()
-        task.wait(0.5)
-        BuildAntiAimParts(LP.Character)
-    end)
+-- ============================================================
+-- [[ AIMBOT - CFRAME BASED ]]
+-- Works on mobile and PC
+-- Uses camera CFrame lerp toward target
+-- ============================================================
+local AimbotFOVCircle      = Drawing.new("Circle")
+AimbotFOVCircle.NumSides   = 64
+AimbotFOVCircle.Filled     = false
+
+local function AimbotKeyActive()
+    -- Always active mode (mobile)
+    if Get("AimbotAlways") then return true end
+    -- Key hold mode
+    local key = Options["AimbotKey"]
+    return key and key:GetState()
+end
+
+local function ApplyAimbot(dt)
+    if not Get("AimbotEnabled") then return end
+    if not AimbotKeyActive() then return end
+
+    local fov      = Opt("AimbotFOV")      or 200
+    local bone     = Opt("AimbotBone")     or "Head"
+    local teamChk  = Get("AimbotTeamCheck")
+    local visChk   = Get("AimbotVisCheck")
+    local smooth   = Opt("AimbotSmoothing") or 10
+
+    local target = GetClosestOnScreen(fov, bone, teamChk, visChk, nil)
+    if not target or not target.Part then return end
+
+    -- Smooth camera CFrame toward target (works on all devices)
+    local camPos    = Camera.CFrame.Position
+    local targetCF  = CFrame.lookAt(camPos, target.Part.Position)
+    local alpha     = math.clamp(1 / smooth * dt * 60, 0.01, 1)
+
+    Camera.CFrame   = Camera.CFrame:Lerp(targetCF, alpha)
 end
 
 -- ============================================================
--- [[ ESP SYSTEM ]]
+-- [[ FOV CIRCLES ]]
 -- ============================================================
-local ESPObjects = {}
+local SilentFOVCircle      = Drawing.new("Circle")
+SilentFOVCircle.NumSides   = 64
+SilentFOVCircle.Filled     = false
 
-local function CreateESP(player)
-    if ESPObjects[player] then return end
+local function UpdateFOVCircles()
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
-    ESPObjects[player] = {
+    -- Aimbot FOV
+    local abFOVOn = Get("AimbotFOVDraw") and Get("AimbotEnabled")
+    AimbotFOVCircle.Visible      = abFOVOn
+    if abFOVOn then
+        local transp = (Opt("AimbotFOVTransp") or 50) / 100
+        AimbotFOVCircle.Position     = center
+        AimbotFOVCircle.Radius       = Opt("AimbotFOV") or 200
+        AimbotFOVCircle.Color        = Options["AimbotFOVColor"].Value or Color3.new(1,1,1)
+        AimbotFOVCircle.Thickness    = 1
+        AimbotFOVCircle.Transparency = transp
+    end
+
+    -- Silent Aim FOV
+    local saFOVOn = Get("SilentAimFOVDraw") and Get("SilentAimEnabled")
+    SilentFOVCircle.Visible      = saFOVOn
+    if saFOVOn then
+        local transp = (Opt("SilentFOVTransp") or 50) / 100
+        SilentFOVCircle.Position     = center
+        SilentFOVCircle.Radius       = Opt("SilentAimFOV") or 250
+        SilentFOVCircle.Color        = Options["SilentFOVColor"].Value or Color3.fromRGB(255,200,0)
+        SilentFOVCircle.Thickness    = 1
+        SilentFOVCircle.Transparency = transp
+    end
+end
+
+-- ============================================================
+-- [[ ESP SYSTEM - FIXED ]]
+-- ============================================================
+local ESPDrawings  = {}
+
+local function CreateESPObj(player)
+    if ESPDrawings[player] then return end
+
+    ESPDrawings[player] = {
         Box      = Drawing.new("Square"),
         Name     = Drawing.new("Text"),
         Distance = Drawing.new("Text"),
@@ -1068,32 +1108,39 @@ local function CreateESP(player)
         HealthFg = Drawing.new("Square"),
     }
 
-    local obj = ESPObjects[player]
-    obj.Box.Thickness      = 1
-    obj.Box.Filled         = false
-    obj.Name.Size          = 13
-    obj.Name.Center        = true
-    obj.Name.Outline       = true
-    obj.Distance.Size      = 12
-    obj.Distance.Center    = true
-    obj.Distance.Outline   = true
-    obj.HealthBg.Filled    = true
-    obj.HealthBg.Thickness = 0
-    obj.HealthFg.Filled    = true
-    obj.HealthFg.Thickness = 0
+    local o = ESPDrawings[player]
+    o.Box.Filled         = false
+    o.Name.Size          = 13
+    o.Name.Center        = true
+    o.Name.Outline       = true
+    o.Name.OutlineColor  = Color3.new(0,0,0)
+    o.Distance.Size      = 12
+    o.Distance.Center    = true
+    o.Distance.Outline   = true
+    o.Distance.OutlineColor = Color3.new(0,0,0)
+    o.HealthBg.Filled    = true
+    o.HealthBg.Thickness = 0
+    o.HealthFg.Filled    = true
+    o.HealthFg.Thickness = 0
 end
 
-local function RemoveESP(player)
-    local obj = ESPObjects[player]
-    if not obj then return end
-    for _, d in pairs(obj) do d:Remove() end
-    ESPObjects[player] = nil
+local function HideESPObj(player)
+    local o = ESPDrawings[player]
+    if not o then return end
+    o.Box.Visible      = false
+    o.Name.Visible     = false
+    o.Distance.Visible = false
+    o.HealthBg.Visible = false
+    o.HealthFg.Visible = false
 end
 
-local function HideESP(player)
-    local obj = ESPObjects[player]
-    if not obj then return end
-    for _, d in pairs(obj) do d.Visible = false end
+local function RemoveESPObj(player)
+    local o = ESPDrawings[player]
+    if not o then return end
+    for _, d in pairs(o) do
+        pcall(function() d:Remove() end)
+    end
+    ESPDrawings[player] = nil
 end
 
 local function UpdateESP()
@@ -1103,107 +1150,130 @@ local function UpdateESP()
     local distOn   = Get("ESPDistance")
     local hpOn     = Get("ESPHealth")
     local teamChk  = Get("ESPTeamCheck")
-    local maxDist  = Opt("ESPMaxDist")  or 500
-    local enmColor = Options["ESPEnemyColor"].Value or Color3.fromRGB(255,50,50)
-    local teamColor= Options["ESPTeamColor"].Value  or Color3.fromRGB(50,255,50)
+    local maxDist  = Opt("ESPMaxDist")     or 500
+    local boxThick = Opt("ESPBoxThickness")or 1
+    local enmCol   = Options["ESPEnemyColor"].Value or Color3.fromRGB(255,60,60)
+    local teamCol  = Options["ESPTeamColor"].Value  or Color3.fromRGB(60,255,60)
+    local nameCol  = Options["ESPNameColor"].Value  or Color3.new(1,1,1)
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LP then continue end
 
         if not espOn then
-            HideESP(player)
+            HideESPObj(player)
             continue
         end
 
-        if not IsAlive(player) then
-            HideESP(player)
+        if not IsPlayerAlive(player) then
+            HideESPObj(player)
             continue
         end
 
         local char = player.Character
-        if not char then HideESP(player) continue end
+        if not char then HideESPObj(player) continue end
 
         local root = char:FindFirstChild("HumanoidRootPart")
-        if not root then HideESP(player) continue end
+        if not root then HideESPObj(player) continue end
 
-        local isTeam = LP.Team and player.Team == LP.Team
-        if teamChk and isTeam then HideESP(player) continue end
-
+        -- Distance check
         local dist3D = (root.Position - Camera.CFrame.Position).Magnitude
-        if dist3D > maxDist then HideESP(player) continue end
+        if dist3D > maxDist then HideESPObj(player) continue end
 
-        CreateESP(player)
-        local obj = ESPObjects[player]
+        -- Team check
+        local isTeam = LP.Team ~= nil and player.Team == LP.Team
+        if teamChk and isTeam then HideESPObj(player) continue end
 
+        -- Get screen positions
         local head    = char:FindFirstChild("Head") or root
-        local headSP, headOn = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.6, 0))
-        local feetSP          = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3, 0))
+        local headTop = head.Position + Vector3.new(0, 0.7, 0)
+        local feetPos = root.Position - Vector3.new(0, 3.2, 0)
 
-        if not headOn then HideESP(player) continue end
+        local headSP, headOnScreen = Camera:WorldToViewportPoint(headTop)
+        local feetSP, _            = Camera:WorldToViewportPoint(feetPos)
 
-        local col  = isTeam and teamColor or enmColor
+        -- Must be on screen
+        if not headOnScreen or headSP.Z <= 0 then
+            HideESPObj(player)
+            continue
+        end
+
+        CreateESPObj(player)
+        local o   = ESPDrawings[player]
+        local col = isTeam and teamCol or enmCol
+
         local h2d  = Vector2.new(headSP.X, headSP.Y)
         local f2d  = Vector2.new(feetSP.X, feetSP.Y)
-        local boxH = math.abs(h2d.Y - f2d.Y)
-        local boxW = boxH * 0.65
-        local boxX = h2d.X - boxW / 2
+        local boxH = math.abs(f2d.Y - h2d.Y)
+        local boxW = boxH * 0.6
+
+        -- Ensure minimum size
+        if boxH < 5 then HideESPObj(player) continue end
+
+        local boxX = h2d.X - boxW * 0.5
         local boxY = h2d.Y
 
         -- Box
-        obj.Box.Visible   = boxOn
+        o.Box.Visible   = boxOn
         if boxOn then
-            obj.Box.Size      = Vector2.new(boxW, boxH)
-            obj.Box.Position  = Vector2.new(boxX, boxY)
-            obj.Box.Color     = col
+            o.Box.Size      = Vector2.new(boxW, boxH)
+            o.Box.Position  = Vector2.new(boxX, boxY)
+            o.Box.Color     = col
+            o.Box.Thickness = boxThick
         end
 
         -- Name
-        obj.Name.Visible  = nameOn
+        o.Name.Visible = nameOn
         if nameOn then
-            obj.Name.Text     = player.DisplayName
-            obj.Name.Position = Vector2.new(h2d.X, boxY - 16)
-            obj.Name.Color    = col
+            o.Name.Text     = player.DisplayName
+            o.Name.Position = Vector2.new(h2d.X, boxY - 16)
+            o.Name.Color    = nameCol
         end
 
         -- Distance
-        obj.Distance.Visible = distOn
+        o.Distance.Visible = distOn
         if distOn then
-            obj.Distance.Text     = string.format("[%.0f]", dist3D)
-            obj.Distance.Position = Vector2.new(h2d.X, f2d.Y + 2)
-            obj.Distance.Color    = Color3.new(1, 1, 1)
+            o.Distance.Text     = string.format("[%d]", math.floor(dist3D))
+            o.Distance.Position = Vector2.new(h2d.X, f2d.Y + 3)
+            o.Distance.Color    = Color3.new(1, 1, 1)
         end
 
         -- Health bar
         local hum = char:FindFirstChildOfClass("Humanoid")
-        obj.HealthBg.Visible = hpOn
-        obj.HealthFg.Visible = hpOn
         if hpOn and hum then
-            local maxHp  = hum.MaxHealth
-            local curHp  = hum.Health
-            local ratio  = math.clamp(curHp / math.max(maxHp, 1), 0, 1)
-            local barH   = boxH * ratio
-            local barX   = boxX - 6
-            local barW   = 3
+            local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+            local barH  = boxH * ratio
+            local barX  = boxX - 5
+            local barW  = 3
 
-            -- Background (empty)
-            obj.HealthBg.Size     = Vector2.new(barW, boxH)
-            obj.HealthBg.Position = Vector2.new(barX, boxY)
-            obj.HealthBg.Color    = Color3.fromRGB(50, 0, 0)
+            o.HealthBg.Visible  = true
+            o.HealthBg.Size     = Vector2.new(barW, boxH)
+            o.HealthBg.Position = Vector2.new(barX, boxY)
+            o.HealthBg.Color    = Color3.fromRGB(40, 0, 0)
 
-            -- Foreground (health)
-            obj.HealthFg.Size     = Vector2.new(barW, barH)
-            obj.HealthFg.Position = Vector2.new(barX, boxY + boxH - barH)
-            obj.HealthFg.Color    = Color3.fromHSV(ratio * 0.33, 1, 1)
+            o.HealthFg.Visible  = true
+            o.HealthFg.Size     = Vector2.new(barW, barH)
+            o.HealthFg.Position = Vector2.new(barX, boxY + boxH - barH)
+            -- Green → Yellow → Red by health ratio
+            o.HealthFg.Color    = Color3.fromHSV(ratio * 0.35, 1, 1)
+        else
+            o.HealthBg.Visible = false
+            o.HealthFg.Visible = false
         end
     end
 end
 
-Players.PlayerRemoving:Connect(RemoveESP)
+Players.PlayerRemoving:Connect(RemoveESPObj)
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function() end)
+end)
 
 -- ============================================================
--- [[ CHAMS SYSTEM ]]
+-- [[ CHAMS SYSTEM - FIXED ]]
+-- Applies to ALL players properly
+-- Stores original data per character
 -- ============================================================
-local ChammedData = {}
+local ChammedChars = {}   -- [char] = { [part] = originalData }
+local ChamsHighlights = {} -- [char] = Highlight instance
 
 local function GetMaterialEnum(style)
     local map = {
@@ -1216,129 +1286,216 @@ local function GetMaterialEnum(style)
     return map[style] or Enum.Material.Neon
 end
 
-local function ApplyChamsToChar(char)
-    if ChammedData[char] then return end
+local function SaveAndApplyChams(char)
+    if not char then return end
+    if not char:FindFirstChild("HumanoidRootPart") then return end
 
-    local style     = Opt("ChamsStyle") or "Neon"
-    local visColor  = Options["ChamsVisColor"].Value  or Color3.fromRGB(0,200,255)
-    local transp    = (Opt("ChamsTransparency") or 30) / 100
-    local matEnum   = GetMaterialEnum(style)
+    -- Save original data
+    if not ChammedChars[char] then
+        ChammedChars[char] = {}
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("BasePart") or obj:IsA("MeshPart") then
+                ChammedChars[char][obj] = {
+                    Color        = obj.Color,
+                    Material     = obj.Material,
+                    Transparency = obj.Transparency,
+                }
+            end
+        end
+    end
 
-    ChammedData[char] = {}
+    local style   = Opt("ChamsStyle")        or "Neon"
+    local col     = Options["ChamsBodyColor"].Value or Color3.fromRGB(0,200,255)
+    local transp  = (Opt("ChamsTransparency") or 30) / 100
+    local matEnum = GetMaterialEnum(style)
 
-    for _, obj in ipairs(char:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("MeshPart") then
-            ChammedData[char][obj] = {
-                Color        = obj.Color,
-                Material     = obj.Material,
-                Transparency = obj.Transparency,
-            }
+    -- Apply to all body parts
+    for obj, _ in pairs(ChammedChars[char]) do
+        if obj and obj.Parent then
             pcall(function()
                 obj.Material     = matEnum
-                obj.Color        = visColor
+                obj.Color        = col
                 obj.Transparency = transp
             end)
         end
     end
 
     -- Wallhack highlight
-    if not char:FindFirstChild("_ChamHL") then
-        local hl                  = Instance.new("Highlight")
-        hl.Name                   = "_ChamHL"
-        hl.FillColor              = Options["ChamsWallColor"].Value or Color3.fromRGB(255,0,100)
-        hl.FillTransparency       = 0.4
-        hl.OutlineTransparency    = 1
-        hl.DepthMode              = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.Adornee                = char
-        hl.Parent                 = char
+    if not ChamsHighlights[char] then
+        local hl = Instance.new("Highlight")
+        hl.Name                = "_ChamHL"
+        hl.FillColor           = Options["ChamsWallColor"].Value or Color3.fromRGB(255,0,100)
+        hl.FillTransparency    = (Opt("ChamsWallTransp") or 40) / 100
+        hl.OutlineTransparency = 1
+        hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Adornee             = char
+        hl.Parent              = char
+        ChamsHighlights[char]  = hl
+    else
+        local hl = ChamsHighlights[char]
+        if hl and hl.Parent then
+            hl.FillColor        = Options["ChamsWallColor"].Value or Color3.fromRGB(255,0,100)
+            hl.FillTransparency = (Opt("ChamsWallTransp") or 40) / 100
+        end
     end
 end
 
-local function RemoveChamsFromChar(char)
-    local data = ChammedData[char]
-    if not data then return end
-
-    for obj, orig in pairs(data) do
-        if obj and obj.Parent then
-            pcall(function()
-                obj.Color        = orig.Color
-                obj.Material     = orig.Material
-                obj.Transparency = orig.Transparency
-            end)
+local function RestoreChams(char)
+    if not char then return end
+    local saved = ChammedChars[char]
+    if saved then
+        for obj, orig in pairs(saved) do
+            if obj and obj.Parent then
+                pcall(function()
+                    obj.Color        = orig.Color
+                    obj.Material     = orig.Material
+                    obj.Transparency = orig.Transparency
+                end)
+            end
         end
+        ChammedChars[char] = nil
     end
 
-    local hl = char:FindFirstChild("_ChamHL")
-    if hl then hl:Destroy() end
-
-    ChammedData[char] = nil
+    local hl = ChamsHighlights[char]
+    if hl and hl.Parent then
+        hl:Destroy()
+    end
+    ChamsHighlights[char] = nil
 end
 
 local function UpdateChams()
     local chamsOn = Get("ChamsEnabled")
+    local teamChk = Get("ChamsTeamCheck")
+
+    -- Rebuild if settings changed
+    if _G.ChamsRebuild then
+        _G.ChamsRebuild = false
+        for char, _ in pairs(ChammedChars) do
+            ChammedChars[char] = nil
+        end
+        for char, hl in pairs(ChamsHighlights) do
+            if hl and hl.Parent then hl:Destroy() end
+            ChamsHighlights[char] = nil
+        end
+    end
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LP then continue end
+
         local char = player.Character
         if not char then continue end
 
-        if chamsOn and IsAlive(player) then
-            if not ChammedData[char] then
-                ApplyChamsToChar(char)
+        local isTeam = LP.Team ~= nil and player.Team == LP.Team
+
+        local shouldChams = chamsOn
+            and IsPlayerAlive(player)
+            and not (teamChk and isTeam)
+
+        if shouldChams then
+            -- Apply chams if not yet applied
+            if not ChammedChars[char] then
+                SaveAndApplyChams(char)
             end
         else
-            if ChammedData[char] then
-                RemoveChamsFromChar(char)
+            -- Remove chams if applied
+            if ChammedChars[char] then
+                RestoreChams(char)
             end
         end
     end
 end
 
-Players.PlayerAdded:Connect(function(p)
-    p.CharacterAdded:Connect(function(c)
-        c:WaitForChild("HumanoidRootPart")
-        task.wait(0.1)
+-- Automatically apply chams on character added (fixes "only some players")
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function(char)
+        -- Wait for character to fully load
+        char:WaitForChild("HumanoidRootPart", 10)
+        task.wait(0.15)
+
         if Get("ChamsEnabled") then
-            ApplyChamsToChar(c)
+            local isTeam = LP.Team ~= nil and player.Team == LP.Team
+            if not (Get("ChamsTeamCheck") and isTeam) then
+                SaveAndApplyChams(char)
+            end
         end
+    end)
+
+    player.CharacterRemoving:Connect(function(char)
+        RestoreChams(char)
     end)
 end)
 
-Players.PlayerRemoving:Connect(function(p)
-    local c = p.Character
-    if c and ChammedData[c] then RemoveChamsFromChar(c) end
-    RemoveESP(p)
+-- Apply to all existing players on script load
+for _, player in ipairs(Players:GetPlayers()) do
+    if player == LP then continue end
+
+    -- Connect future character additions
+    player.CharacterAdded:Connect(function(char)
+        char:WaitForChild("HumanoidRootPart", 10)
+        task.wait(0.15)
+        if Get("ChamsEnabled") then
+            local isTeam = LP.Team ~= nil and player.Team == LP.Team
+            if not (Get("ChamsTeamCheck") and isTeam) then
+                SaveAndApplyChams(char)
+            end
+        end
+    end)
+
+    player.CharacterRemoving:Connect(function(char)
+        RestoreChams(char)
+    end)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+    local char = player.Character
+    if char then RestoreChams(char) end
+    RemoveESPObj(player)
 end)
 
 -- ============================================================
--- [[ BULLET TRACER ]]
+-- [[ BULLET TRACER - DRAWING BASED ]]
+-- Uses ProjectileRender hook to intercept projectile data
+-- Spawns Drawing.Line from chosen origin to hit point
 -- ============================================================
-local TracerLines = {}
+local ActiveTracers = {}
 
-local function SpawnTracer(fromPos, toPos)
+local function SpawnTracer(originWorldPos, endWorldPos)
     if not Get("TracerEnabled") then return end
 
-    local screenFrom, onFrom = Camera:WorldToViewportPoint(fromPos)
-    local screenTo,   onTo   = Camera:WorldToViewportPoint(toPos)
-    if not onFrom and not onTo then return end
-
     local col      = Options["TracerColor"].Value    or Color3.fromRGB(0,255,255)
-    local thick    = Opt("TracerThickness") or 2
-    local lifetime = (Opt("TracerLifetime") or 500) / 1000
+    local thick    = Opt("TracerThickness")           or 2
+    local lifetime = (Opt("TracerLifetime") or 500)  / 1000
     local fade     = Get("TracerFade")
+    local fromMode = Opt("TracerFrom") or "Camera"
+
+    -- Determine screen start point
+    local startVP
+    if fromMode == "Bottom Screen" then
+        startVP = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+    else
+        -- Camera center
+        local camSP = Camera:WorldToViewportPoint(originWorldPos)
+        startVP = Vector2.new(camSP.X, camSP.Y)
+    end
+
+    -- End point
+    local endSP, onScreen = Camera:WorldToViewportPoint(endWorldPos)
+    if not onScreen or endSP.Z <= 0 then return end
+
+    local endVP = Vector2.new(endSP.X, endSP.Y)
 
     local line         = Drawing.new("Line")
     line.Visible       = true
-    line.From          = Vector2.new(screenFrom.X, screenFrom.Y)
-    line.To            = Vector2.new(screenTo.X, screenTo.Y)
+    line.From          = startVP
+    line.To            = endVP
     line.Color         = col
     line.Thickness     = thick
     line.Transparency  = 0
 
     task.spawn(function()
         if fade then
-            local steps   = 20
-            local stepT   = lifetime / steps
+            local steps = 20
+            local stepT = lifetime / steps
             for i = 1, steps do
                 if not line then break end
                 line.Transparency = i / steps
@@ -1347,140 +1504,80 @@ local function SpawnTracer(fromPos, toPos)
         else
             task.wait(lifetime)
         end
-        line:Remove()
+        pcall(function() line:Remove() end)
     end)
 end
 
--- Hook BulletHandler fire completions via workspace projectile detection
-workspace.DescendantAdded:Connect(function(obj)
-    if not Get("TracerEnabled") then return end
-    if not obj:IsA("BasePart") then return end
-    task.defer(function()
-        if not obj or not obj.Parent then return end
-        local vel = obj.AssemblyLinearVelocity.Magnitude
-        if vel > 30 then
-            local camPos = Camera.CFrame.Position
-            SpawnTracer(camPos, obj.Position)
+-- Hook ProjectileRender to capture bullet data for tracers
+if ProjectileRender and ProjectileRender.Cast and not PRHooked then
+    OriginalPRCast = ProjectileRender.Cast
+
+    ProjectileRender.Cast = function(self, data)
+        -- Spawn drawing tracer from captured data
+        if Get("TracerEnabled") and data then
+            local origin   = data.Origin   or Camera.CFrame.Position
+            local endpoint = data.Endpoint or (origin + Vector3.new(0, 0, -100))
+            task.spawn(function()
+                SpawnTracer(origin, endpoint)
+            end)
         end
-    end)
-end)
+
+        -- Disable original tracer if toggle is on
+        if Get("TracerEnabled") and Get("TracerDisableOriginal") then
+            return
+        end
+
+        return OriginalPRCast(self, data)
+    end
+
+    PRHooked = true
+    print("[creep.cc] ProjectileRender.Cast hooked for tracers")
+end
 
 -- ============================================================
 -- [[ SKYBOX ]]
 -- ============================================================
 local SkyboxData = {
     ["Two Moon"] = {
-        Ft = "rbxassetid://12173272214",
-        Bk = "rbxassetid://12173268397",
-        Lf = "rbxassetid://12173273102",
-        Rt = "rbxassetid://12173273903",
-        Up = "rbxassetid://12173274627",
-        Dn = "rbxassetid://12173271252",
+        Ft = "rbxassetid://12173272214", Bk = "rbxassetid://12173268397",
+        Lf = "rbxassetid://12173273102", Rt = "rbxassetid://12173273903",
+        Up = "rbxassetid://12173274627", Dn = "rbxassetid://12173271252",
     },
     ["Aurora"] = {
-        Ft = "rbxassetid://17124362093",
-        Bk = "rbxassetid://17124357467",
-        Lf = "rbxassetid://17124365127",
-        Rt = "rbxassetid://17124367200",
-        Up = "rbxassetid://17124369657",
-        Dn = "rbxassetid://17124359797",
+        Ft = "rbxassetid://17124362093", Bk = "rbxassetid://17124357467",
+        Lf = "rbxassetid://17124365127", Rt = "rbxassetid://17124367200",
+        Up = "rbxassetid://17124369657", Dn = "rbxassetid://17124359797",
     },
     ["Night"] = {
-        Ft = "rbxassetid://154185021",
-        Bk = "rbxassetid://154185004",
-        Lf = "rbxassetid://154184943",
-        Rt = "rbxassetid://154184972",
-        Up = "rbxassetid://154185031",
-        Dn = "rbxassetid://154184960",
+        Ft = "rbxassetid://154185021", Bk = "rbxassetid://154185004",
+        Lf = "rbxassetid://154184943", Rt = "rbxassetid://154184972",
+        Up = "rbxassetid://154185031", Dn = "rbxassetid://154184960",
     },
 }
 
-local Lighting = game:GetService("Lighting")
-local OrigSky  = Lighting:FindFirstChildOfClass("Sky")
+local OriginalSky = Lighting:FindFirstChildOfClass("Sky")
 
 function ApplySkybox(name)
     local existing = Lighting:FindFirstChildOfClass("Sky")
     if existing then existing:Destroy() end
 
     if name == "Default" then
-        if OrigSky then
-            OrigSky:Clone().Parent = Lighting
-        end
+        if OriginalSky then OriginalSky:Clone().Parent = Lighting end
         return
     end
 
     local data = SkyboxData[name]
     if not data then return end
 
-    local sky        = Instance.new("Sky")
-    sky.SkyboxFt     = data.Ft
-    sky.SkyboxBk     = data.Bk
-    sky.SkyboxLf     = data.Lf
-    sky.SkyboxRt     = data.Rt
-    sky.SkyboxUp     = data.Up
-    sky.SkyboxDn     = data.Dn
-    sky.Parent       = Lighting
+    local sky     = Instance.new("Sky")
+    sky.SkyboxFt  = data.Ft
+    sky.SkyboxBk  = data.Bk
+    sky.SkyboxLf  = data.Lf
+    sky.SkyboxRt  = data.Rt
+    sky.SkyboxUp  = data.Up
+    sky.SkyboxDn  = data.Dn
+    sky.Parent    = Lighting
 end
-
--- ============================================================
--- [[ FOV CIRCLE ]]
--- ============================================================
-local SilentFOVCircle     = Drawing.new("Circle")
-SilentFOVCircle.NumSides  = 64
-SilentFOVCircle.Filled    = false
-SilentFOVCircle.Thickness = 1
-
-local function UpdateFOVCircle()
-    local visible = Get("SilentAimFOVDraw") and Get("SilentAimEnabled")
-    SilentFOVCircle.Visible     = visible or false
-    if not visible then return end
-
-    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-    SilentFOVCircle.Position    = center
-    SilentFOVCircle.Radius      = Opt("SilentAimFOV") or 250
-    SilentFOVCircle.Color       = Options["SilentFOVColor"].Value or Color3.new(1,1,1)
-    SilentFOVCircle.Transparency= 0
-end
-
--- ============================================================
--- [[ WEAPON UNLOCK LOOP ]]
--- ============================================================
-task.spawn(function()
-    while not bc.Unloaded do
-        task.wait(0.1)
-        if _G.DoWeaponUnlock then
-            _G.DoWeaponUnlock = false
-            if EquipItemRemote then
-                pcall(function()
-                    EquipItemRemote:FireServer(getgenv().WeaponUnlockName or "")
-                end)
-            end
-        end
-    end
-end)
-
--- ============================================================
--- [[ RAGEBOT LOOP ]]
--- ============================================================
-local LastRagebot = 0
-
-task.spawn(function()
-    while not bc.Unloaded do
-        task.wait(0.016)
-
-        local now      = tick()
-        local interval = (Opt("RagebotRepeat") or 200) / 1000
-
-        local shouldFire = (getgenv().RagebotEnabled and now - LastRagebot >= interval)
-            or _G.ForceKillAll
-
-        if shouldFire then
-            _G.ForceKillAll = false
-            LastRagebot     = now
-            RunRagebot()
-        end
-    end
-end)
 
 -- ============================================================
 -- [[ MAIN RENDER LOOP ]]
@@ -1488,8 +1585,11 @@ end)
 local RenderConn = RunService.RenderStepped:Connect(function(dt)
     if bc.Unloaded then return end
 
-    -- FOV Circle
-    UpdateFOVCircle()
+    -- Aimbot
+    ApplyAimbot(dt)
+
+    -- FOV Circles
+    UpdateFOVCircles()
 
     -- ESP
     UpdateESP()
@@ -1497,30 +1597,21 @@ local RenderConn = RunService.RenderStepped:Connect(function(dt)
     -- Chams
     UpdateChams()
 
-    -- Anti Aim
-    if getgenv().AntiAimEnabled then
-        local char = GetChar()
-        if char then
-            ApplyAntiAim(char)
-        end
-    end
-
-    -- Night Mode bloom update
+    -- Night mode bloom
     if Get("NightMode") then
-        local bloom = Lighting:FindFirstChild("NightBloom")
-        if not bloom then
-            bloom           = Instance.new("BloomEffect")
-            bloom.Name      = "NightBloom"
-            bloom.Size      = Opt("NightBloomSize") or 20
-            bloom.Intensity = Opt("NightBloomIntensity") or 1
-            bloom.Threshold = 0.9
-            bloom.Parent    = Lighting
+        if not Lighting:FindFirstChild("NightBloom") then
+            local b           = Instance.new("BloomEffect")
+            b.Name            = "NightBloom"
+            b.Size            = Opt("NightBloomSize")      or 20
+            b.Intensity       = Opt("NightBloomIntensity") or 1
+            b.Threshold       = 0.9
+            b.Parent          = Lighting
         end
     end
 
-    -- World Color
+    -- World color
     if Get("WorldColorEnabled") then
-        Lighting.Ambient        = Options["WorldAmbient"].Value  or Color3.fromRGB(128,128,128)
+        Lighting.Ambient        = Options["WorldAmbient"].Value or Color3.fromRGB(128,128,128)
         Lighting.OutdoorAmbient = Options["WorldOutdoor"].Value or Color3.fromRGB(128,128,128)
     end
 end)
@@ -1530,46 +1621,37 @@ end)
 -- ============================================================
 bc:OnUnload(function()
     bc.Unloaded = true
-
-    -- Disconnect render
     if RenderConn then RenderConn:Disconnect() end
 
-    -- Restore BulletHandler
-    if BulletHandler and OriginalFire then
-        BulletHandler.Fire = OriginalFire
+    -- Restore hooks
+    if BulletHandler and OriginalBHFire then
+        BulletHandler.Fire = OriginalBHFire
         print("[creep.cc] BulletHandler.Fire restored")
     end
-
-    -- Remove ESP
-    for _, player in ipairs(Players:GetPlayers()) do
-        RemoveESP(player)
-        local char = player.Character
-        if char and ChammedData[char] then
-            RemoveChamsFromChar(char)
-        end
+    if ProjectileRender and OriginalPRCast then
+        ProjectileRender.Cast = OriginalPRCast
+        print("[creep.cc] ProjectileRender.Cast restored")
     end
 
-    -- Restore anti aim
-    RestoreAntiAim()
+    -- Remove all ESP
+    for _, player in ipairs(Players:GetPlayers()) do
+        RemoveESPObj(player)
+        local char = player.Character
+        if char then RestoreChams(char) end
+    end
 
     -- Remove drawings
+    AimbotFOVCircle:Remove()
     SilentFOVCircle:Remove()
-    for _, line in ipairs(TracerLines) do
-        if line then line:Remove() end
-    end
 
     -- Restore lighting
-    Lighting.ClockTime      = 12
-    Lighting.Brightness     = 2
-    Lighting.FogStart       = 3000
-    Lighting.FogEnd         = 3000
+    Lighting.ClockTime  = 12
+    Lighting.Brightness = 2
     local bloom = Lighting:FindFirstChild("NightBloom")
     if bloom then bloom:Destroy() end
-
-    -- Restore skybox
     ApplySkybox("Default")
 
-    print("[creep.cc] Rivals Combat Script unloaded.")
+    print("[creep.cc] Rivals unloaded.")
 end)
 
 return function() bc:Unload() end
